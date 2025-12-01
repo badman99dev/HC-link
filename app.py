@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify, render_template_string
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from urllib.parse import unquote
 from bs4 import BeautifulSoup
 import re
 import os
@@ -29,17 +30,12 @@ def get_timestamp():
     return datetime.now().strftime("%H:%M:%S")
 
 def extract_google_from_html(html_content):
-    """HTML me se Google link nikalne ka ninja technique"""
+    """Fallback: Agar URL me link na mile to HTML chhan maaro"""
     soup = BeautifulSoup(html_content, 'html.parser')
-    
-    # 1. Try finding by Regex (Sabse tagda tarika)
     g_tag = soup.find('a', href=re.compile(r'video-downloads\.googleusercontent\.com'))
     if g_tag: return g_tag['href']
-    
-    # 2. Try hidden id="vd"
     vd_tag = soup.find('a', id='vd')
     if vd_tag: return vd_tag['href']
-    
     return None
 
 def generate_stream_links(file_id):
@@ -51,9 +47,9 @@ def generate_stream_links(file_id):
     logs.append(f"[{get_timestamp()}] 🕵️‍♂️ Visiting HubCloud: {hub_url}")
 
     try:
-        # Step 1: HubCloud
-        time.sleep(random.uniform(0.2, 0.5))
-        resp = session.get(hub_url, timeout=15)
+        # Step 1: HubCloud (Fast Fetch)
+        time.sleep(random.uniform(0.1, 0.3)) # Kam delay
+        resp = session.get(hub_url, timeout=10)
         soup = BeautifulSoup(resp.text, 'html.parser')
         
         generate_btn = soup.find('a', id='download')
@@ -66,47 +62,69 @@ def generate_stream_links(file_id):
 
         # Step 2: GamerXYT
         session.headers.update({'Referer': hub_url})
-        time.sleep(random.uniform(0.5, 1.0))
+        time.sleep(random.uniform(0.3, 0.7))
         
-        resp2 = session.get(next_url, timeout=15)
+        resp2 = session.get(next_url, timeout=10)
         soup2 = BeautifulSoup(resp2.text, 'html.parser')
         
-        # --- A. GOOGLE LINK STRATEGY (The Deep Hunt) ---
-        google_link = extract_google_from_html(resp2.text)
+        # --- A. GOOGLE LINK STRATEGY (Turbo Mode) ---
+        google_link = None
         
+        # 1. Try finding in GamerXYT HTML first (Fastest)
+        google_link = extract_google_from_html(resp2.text)
         if google_link:
-            logs.append(f"[{get_timestamp()}] 🔥 Direct Google Link found on GamerXYT!")
-        else:
-            # Agar GamerXYT par nahi mila, to "Redirect Chain" follow karo
-            # Ye Pixel -> RohitKiskk -> Carnewz wala rasta hai
+             logs.append(f"[{get_timestamp()}] 🔥 Google Link found instantly on GamerXYT!")
+
+        # 2. Redirect Chase (Agar upar wala fail ho)
+        if not google_link:
             hubcdn_tag = soup2.find('a', href=re.compile(r'pixel\.hubcdn\.fans'))
             
             if hubcdn_tag:
-                raw_link = hubcdn_tag['href']
-                logs.append(f"[{get_timestamp()}] 🕵️‍♂️ Following Rabbit Hole: {raw_link[:30]}...")
+                current_url = hubcdn_tag['href']
+                logs.append(f"[{get_timestamp()}] 🏃 Chasing Redirects...")
                 
-                try:
-                    # Allow Redirects = True (Ab hume rohitkiskk se aage jana hai)
-                    final_resp = session.get(raw_link, headers={'Referer': next_url}, allow_redirects=True, timeout=15)
-                    
-                    logs.append(f"[{get_timestamp()}] 📍 Landed on: {final_resp.url}")
-                    
-                    # Case 1: Agar redirect seedha file par le gaya
-                    if 'googleusercontent' in final_resp.url:
-                        google_link = final_resp.url
-                        logs.append(f"[{get_timestamp()}] 🔥 Redirect resolved directly to File!")
-                    
-                    # Case 2: Agar Carnewz/Blog page par land huye
-                    else:
-                        logs.append(f"[{get_timestamp()}] 📄 Scanning landing page for hidden link...")
-                        google_link = extract_google_from_html(final_resp.text)
-                        if google_link:
-                            logs.append(f"[{get_timestamp()}] 🔥 Found Google Link inside {final_resp.url}!")
-                        else:
-                            logs.append(f"[{get_timestamp()}] ❌ Link not found even on landing page.")
+                # Chase Loop
+                for i in range(4): 
+                    try:
+                        # Allow redirects=False to verify headers manually
+                        redir_req = session.get(current_url, headers={'Referer': next_url}, allow_redirects=False, timeout=8)
+                        
+                        if 'Location' in redir_req.headers:
+                            loc = redir_req.headers['Location']
+                            
+                            # 🚀 TURBO CHECK: Kya URL me hi Link hai? (Carnewz Optimization)
+                            if 'link=' in loc and 'googleusercontent' in loc:
+                                # Extract content after 'link='
+                                try:
+                                    google_link = unquote(loc.split('link=')[1].split('&')[0])
+                                    logs.append(f"[{get_timestamp()}] ⚡ TURBO: Extracted Google Link from URL param!")
+                                    break
+                                except:
+                                    pass
 
-                except Exception as ex:
-                    logs.append(f"[{get_timestamp()}] 💥 Chase Error: {str(ex)}")
+                            # Normal Check
+                            if 'googleusercontent' in loc:
+                                google_link = loc
+                                logs.append(f"[{get_timestamp()}] 🔥 Redirect Resolved to Google Drive!")
+                                break
+                            
+                            # Next Hop
+                            current_url = loc
+                        
+                        elif redir_req.status_code == 200:
+                            # Agar 200 OK aa gaya matlab hum landing page par hain (e.g. Carnewz)
+                            # Ab HTML parse karna padega
+                            logs.append(f"[{get_timestamp()}] 📄 Landed on page. Scanning HTML...")
+                            google_link = extract_google_from_html(redir_req.text)
+                            if google_link:
+                                logs.append(f"[{get_timestamp()}] 🔥 Found Google Link inside HTML!")
+                            break
+                        else:
+                            break
+                            
+                    except Exception as ex:
+                        logs.append(f"[{get_timestamp()}] 💥 Chase Error: {str(ex)}")
+                        break
 
         if google_link:
             links['google'] = google_link
@@ -152,7 +170,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Stream Generator v3.1</title>
+    <title>Stream Generator v3.2 (Turbo)</title>
     <style>
         body { background-color: #0d1117; color: #00ff41; font-family: monospace; padding: 20px; }
         .container { max-width: 800px; margin: 0 auto; }
@@ -174,7 +192,7 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <div class="container">
-        <h1>🧪 Stream Link Generator</h1>
+        <h1>🧪 Stream Link Generator (Turbo)</h1>
         <div class="input-group">
             <input type="text" id="idInput" placeholder="Enter HubCloud ID..." value="">
             <button id="genBtn" onclick="generateLink()">GENERATE</button>
@@ -220,7 +238,7 @@ HTML_TEMPLATE = """
                         div.className = 'log-entry';
                         div.textContent = log;
                         if(log.includes('❌') || log.includes('⚠️')) div.classList.add('error');
-                        if(log.includes('🔥') || log.includes('✅')) div.classList.add('success');
+                        if(log.includes('🔥') || log.includes('✅') || log.includes('⚡')) div.classList.add('success');
                         logBox.appendChild(div);
                     });
                     logBox.scrollTop = logBox.scrollHeight;
