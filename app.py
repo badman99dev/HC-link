@@ -28,6 +28,20 @@ def create_robust_session():
 def get_timestamp():
     return datetime.now().strftime("%H:%M:%S")
 
+def extract_google_from_html(html_content):
+    """HTML me se Google link nikalne ka ninja technique"""
+    soup = BeautifulSoup(html_content, 'html.parser')
+    
+    # 1. Try finding by Regex (Sabse tagda tarika)
+    g_tag = soup.find('a', href=re.compile(r'video-downloads\.googleusercontent\.com'))
+    if g_tag: return g_tag['href']
+    
+    # 2. Try hidden id="vd"
+    vd_tag = soup.find('a', id='vd')
+    if vd_tag: return vd_tag['href']
+    
+    return None
+
 def generate_stream_links(file_id):
     session = create_robust_session()
     logs = []
@@ -57,42 +71,42 @@ def generate_stream_links(file_id):
         resp2 = session.get(next_url, timeout=15)
         soup2 = BeautifulSoup(resp2.text, 'html.parser')
         
-        # --- A. GOOGLE LINK STRATEGY ---
-        google_link = None
+        # --- A. GOOGLE LINK STRATEGY (The Deep Hunt) ---
+        google_link = extract_google_from_html(resp2.text)
         
-        # Strategy 1: Hidden ID 'vd' (Fastest)
-        vd_tag = soup2.find('a', id='vd')
-        if vd_tag:
-            google_link = vd_tag['href']
-            logs.append(f"[{get_timestamp()}] 🔥 Direct Google Link found (Strategy 1).")
-        
-        # Strategy 2: Regex in href (Reliable)
-        if not google_link:
-            g_tag = soup2.find('a', href=re.compile(r'video-downloads\.googleusercontent\.com'))
-            if g_tag:
-                google_link = g_tag['href']
-                logs.append(f"[{get_timestamp()}] 🔥 Google Link found via Regex (Strategy 2).")
-
-        # Strategy 3: Resolve 'pixel.hubcdn.fans' redirect (The "Redirect" Trick)
-        if not google_link:
+        if google_link:
+            logs.append(f"[{get_timestamp()}] 🔥 Direct Google Link found on GamerXYT!")
+        else:
+            # Agar GamerXYT par nahi mila, to "Redirect Chain" follow karo
+            # Ye Pixel -> RohitKiskk -> Carnewz wala rasta hai
             hubcdn_tag = soup2.find('a', href=re.compile(r'pixel\.hubcdn\.fans'))
+            
             if hubcdn_tag:
                 raw_link = hubcdn_tag['href']
-                logs.append(f"[{get_timestamp()}] 🕵️‍♂️ Resolving Redirect: {raw_link[:40]}...")
+                logs.append(f"[{get_timestamp()}] 🕵️‍♂️ Following Rabbit Hole: {raw_link[:30]}...")
+                
                 try:
-                    # Request without following redirect to catch the header
-                    # IMPORTANT: Referer must be the GamerXYT url (next_url)
-                    redir_req = session.get(raw_link, headers={'Referer': next_url}, allow_redirects=False, timeout=10)
+                    # Allow Redirects = True (Ab hume rohitkiskk se aage jana hai)
+                    final_resp = session.get(raw_link, headers={'Referer': next_url}, allow_redirects=True, timeout=15)
                     
-                    if 'Location' in redir_req.headers:
-                        loc = redir_req.headers['Location']
-                        if 'googleusercontent' in loc:
-                            google_link = loc
-                            logs.append(f"[{get_timestamp()}] 🔥 Redirect Resolved to Google Drive (Strategy 3)!")
+                    logs.append(f"[{get_timestamp()}] 📍 Landed on: {final_resp.url}")
+                    
+                    # Case 1: Agar redirect seedha file par le gaya
+                    if 'googleusercontent' in final_resp.url:
+                        google_link = final_resp.url
+                        logs.append(f"[{get_timestamp()}] 🔥 Redirect resolved directly to File!")
+                    
+                    # Case 2: Agar Carnewz/Blog page par land huye
+                    else:
+                        logs.append(f"[{get_timestamp()}] 📄 Scanning landing page for hidden link...")
+                        google_link = extract_google_from_html(final_resp.text)
+                        if google_link:
+                            logs.append(f"[{get_timestamp()}] 🔥 Found Google Link inside {final_resp.url}!")
                         else:
-                            logs.append(f"[{get_timestamp()}] ⚠️ Redirected to: {loc}")
+                            logs.append(f"[{get_timestamp()}] ❌ Link not found even on landing page.")
+
                 except Exception as ex:
-                    logs.append(f"[{get_timestamp()}] 💥 Redirect Resolution Failed: {str(ex)}")
+                    logs.append(f"[{get_timestamp()}] 💥 Chase Error: {str(ex)}")
 
         if google_link:
             links['google'] = google_link
@@ -138,7 +152,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Stream Generator v3.0</title>
+    <title>Stream Generator v3.1</title>
     <style>
         body { background-color: #0d1117; color: #00ff41; font-family: monospace; padding: 20px; }
         .container { max-width: 800px; margin: 0 auto; }
