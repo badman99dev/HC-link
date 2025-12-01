@@ -1,36 +1,62 @@
 from flask import Flask, request, jsonify, render_template_string
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 import concurrent.futures
 import re
 import os
 import time
+import random
 from datetime import datetime
 
 app = Flask(__name__)
 
-# --- 🎭 HEADERS (Sudmas Mode) ---
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.5',
-    'Connection': 'keep-alive',
-    'Upgrade-Insecure-Requests': '1',
-}
+# --- 🛠️ ROBUST SESSION CREATOR ---
+# Ye function ek aisa session banayega jo haar nahi maanega (Retry Logic)
+def create_robust_session():
+    session = requests.Session()
+    
+    # Headers (Sudmas Mode)
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+    })
 
-session = requests.Session()
-session.headers.update(HEADERS)
+    # Retry Strategy:
+    # Total 3 retries.
+    # Backoff factor 1 means: wait 1s, then 2s, then 4s...
+    # Status forcelist: 500, 502, 504 errors par retry karega.
+    retries = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=[500, 502, 503, 504, 104], 
+        allowed_methods=["HEAD", "GET", "OPTIONS"]
+    )
+    
+    adapter = HTTPAdapter(max_retries=retries)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
 
 # --- 🛠️ HELPER FUNCTIONS ---
 
 def get_timestamp():
     return datetime.now().strftime("%H:%M:%S")
 
-def get_soup(url, referer=None):
+def get_soup(session, url, referer=None):
     try:
-        headers = HEADERS.copy()
-        if referer: headers['Referer'] = referer
-        resp = session.get(url, headers=headers, timeout=20) # Timeout increased slightly
+        if referer: session.headers['Referer'] = referer
+        
+        # 💤 RANDOM SLEEP (Anti-Ban Trick)
+        # Har request se pahle 0.5 se 1.5 second ruko
+        time.sleep(random.uniform(0.5, 1.5))
+        
+        resp = session.get(url, timeout=20)
+        
         if resp.status_code == 200:
             return BeautifulSoup(resp.text, 'html.parser'), resp.status_code
         return None, resp.status_code
@@ -40,58 +66,57 @@ def get_soup(url, referer=None):
 def process_chain(task_data):
     """
     Ek Unique Chain ko process karta hai.
-    Target: HubDrive Space -> HubCloud ID
+    Using Independent Session for thread safety.
     """
     quality = task_data['quality']
     start_link = task_data['url'] 
     logs = []
     
-    logs.append(f"[{get_timestamp()}] ⏳ [{quality}] Processing Chain: {start_link} ...")
+    # Har thread ka apna "Robust Session" hoga
+    local_session = create_robust_session()
+    
+    logs.append(f"[{get_timestamp()}] ⏳ [{quality}] Processing Chain...")
 
     # --- STEP 1: GyaniGurus ---
-    soup_gg, status = get_soup(start_link)
+    soup_gg, status = get_soup(local_session, start_link)
     if not soup_gg: 
-        logs.append(f"[{get_timestamp()}] ❌ [{quality}] Failed to fetch GyaniGurus (Status: {status})")
+        logs.append(f"[{get_timestamp()}] ❌ [{quality}] Failed to fetch GyaniGurus (Error: {status})")
         return None, logs
 
     hubdrive_link = None
     
-    # 🎯 FIX: Strictly find 'hubdrive.space'
-    # Page par bohot links hote hain, hame specific domain chahiye
+    # Targeting HubDrive Space
     all_links = soup_gg.find_all('a', href=True)
     for a in all_links:
         href = a['href']
-        # Hum specifically 'hubdrive.space' dhund rahe hain
         if 'hubdrive.space' in href:
             hubdrive_link = href
             break
             
     if not hubdrive_link:
-        # Fallback: Agar space nahi mila, to general hubdrive check karo (but warn logs)
-        # logs.append(f"[{get_timestamp()}] ⚠️ [{quality}] 'hubdrive.space' not found, checking alternatives...")
+        # Fallback
         for a in all_links:
             href = a['href']
-            if 'hubdrive' in href and 'drivehub.cfd' not in href: # Avoid CFD garbage
+            if 'hubdrive' in href and 'drivehub.cfd' not in href:
                 hubdrive_link = href
                 break
     
     if not hubdrive_link: 
-        logs.append(f"[{get_timestamp()}] ❌ [{quality}] Target HubDrive Link NOT found on Gyani.")
+        logs.append(f"[{get_timestamp()}] ❌ [{quality}] HubDrive Link NOT found on Gyani.")
         return None, logs
     
     logs.append(f"[{get_timestamp()}] ✅ [{quality}] HubDrive Found: {hubdrive_link}")
 
     # --- STEP 2: HubDrive ---
-    soup_hd, status = get_soup(hubdrive_link, referer=start_link)
+    soup_hd, status = get_soup(local_session, hubdrive_link, referer=start_link)
     if not soup_hd: 
-        logs.append(f"[{get_timestamp()}] ❌ [{quality}] Failed to fetch HubDrive (Status: {status})")
+        logs.append(f"[{get_timestamp()}] ❌ [{quality}] Failed to fetch HubDrive (Error: {status})")
         return None, logs
 
     hubcloud_link = None
     for a in soup_hd.find_all('a', href=True):
         href = a['href']
         text = a.get_text().lower()
-        # HubCloud dhundne ka logic (Text or Link)
         if ('hubcloud' in href or 'hubcloud' in text) and 'drive' in href:
             hubcloud_link = href
             break
@@ -103,7 +128,6 @@ def process_chain(task_data):
     logs.append(f"[{get_timestamp()}] ✅ [{quality}] HubCloud Found: {hubcloud_link}")
 
     # --- STEP 3: Extract ID ---
-    # Regex to catch ID from: https://hubcloud.foo/drive/ID_HERE
     match = re.search(r'\/drive\/([a-zA-Z0-9]+)', hubcloud_link)
     if match:
         final_id = match.group(1)
@@ -134,7 +158,10 @@ def scrape_movie():
     main_logs = []
     main_logs.append(f"[{get_timestamp()}] 🚀 HEIST STARTED on: {target_url}")
 
-    soup, status = get_soup(target_url)
+    # Main thread session
+    main_session = create_robust_session()
+    soup, status = get_soup(main_session, target_url)
+    
     if not soup:
         return jsonify({
             "error": "Failed to fetch DesireMovies page", 
@@ -142,33 +169,32 @@ def scrape_movie():
         }), 500
 
     tasks = []
-    seen_urls = set() # 🧠 DUPLICATE CHECKER
+    seen_urls = set()
     
-    # DesireMovies Links Dhundo
-    # Hum sare links check karenge (G-DRIVE, DOWNLOAD, etc.)
     for link in soup.find_all('a', href=True):
         href = link['href']
         text = link.get_text().strip().upper()
         
-        # Link Filter: GyaniGurus/Shorteners
+        # Link Filtering
         if ('gyanigurus' in href or 'gurl' in href) and ('DOWNLOAD' in text or 'G-DRIVE' in text):
-            
-            # 🛑 DEDUPLICATION LOGIC
-            # Agar ye URL pehle dikh chuka hai, to skip karo
-            if href in seen_urls:
-                continue
-            
-            seen_urls.add(href) # Mark as seen
+            if href in seen_urls: continue
+            seen_urls.add(href)
 
-            # Quality Guessing
+            # Improved Quality Guessing
             quality = "Unknown"
-            prev = link.find_previous(['p', 'h3', 'h4', 'strong', 'span'])
-            if prev:
-                prev_text = prev.get_text().strip()
-                if '480p' in prev_text: quality = "480p"
-                elif '720p' in prev_text: quality = "720p"
-                elif '1080p' in prev_text: quality = "1080p"
-                elif '4k' in prev_text or '2160p' in prev_text: quality = "4K"
+            # Try finding quality in the link text itself first
+            if '480' in text: quality = "480p"
+            elif '720' in text: quality = "720p"
+            elif '1080' in text: quality = "1080p"
+            else:
+                # Fallback to finding previous element
+                prev = link.find_previous(['p', 'h3', 'h4', 'strong', 'span', 'b'])
+                if prev:
+                    prev_text = prev.get_text().strip()
+                    if '480p' in prev_text: quality = "480p"
+                    elif '720p' in prev_text: quality = "720p"
+                    elif '1080p' in prev_text: quality = "1080p"
+                    elif '4k' in prev_text or '2160p' in prev_text: quality = "4K"
             
             tasks.append({'quality': quality, 'url': href})
 
@@ -177,8 +203,8 @@ def scrape_movie():
     results = []
     all_thread_logs = []
 
-    # Multi-threading (5 Workers)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+    # 🛑 THREADS REDUCED TO 3 FOR STABILITY
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         future_to_url = {executor.submit(process_chain, task): task for task in tasks}
         
         for future in concurrent.futures.as_completed(future_to_url):
@@ -203,7 +229,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HubCloud Heist Terminal 2.0</title>
+    <title>HubCloud Heist Terminal 2.1 (Anti-Ban)</title>
     <style>
         body {
             background-color: #0d1117;
@@ -256,16 +282,16 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <div class="container">
-        <h1>🕵️‍♂️ HubCloud Heist Terminal 2.0</h1>
+        <h1>🕵️‍♂️ HubCloud Heist Terminal 2.1</h1>
         
         <div class="input-group">
-            <input type="text" id="urlInput" placeholder="Enter DesireMovies Link..." value="https://desiremovies.group/avengers-endgame-full-movie-download/">
+            <input type="text" id="urlInput" placeholder="Enter DesireMovies Link..." value="https://desiremovies.group/dracula-a-love-tale-2025-web-hdrip/">
             <button id="startBtn" onclick="startHeist()">EXTRACT IDs</button>
         </div>
 
         <div class="panel">
             <h3 style="margin-top:0; color:#58a6ff;">📟 Live System Logs</h3>
-            <div class="logs" id="logBox">System Ready...</div>
+            <div class="logs" id="logBox">System Ready (Anti-Ban Active)...</div>
         </div>
 
         <div class="panel hidden" id="resultPanel">
